@@ -242,7 +242,7 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 def main() -> None:
     """تشغيل البوت."""
     # ضع التوكن الخاص بك هنا
-    TOKEN = "YOUR_BOT_TOKEN_HERE"
+    TOKEN = "8791476397:AAHnp5P-gsbcG7FXqIPhcYNEjxqeMBHCZaY"
 
     # إنشاء التطبيق
     application = Application.builder().token(TOKEN).build()
